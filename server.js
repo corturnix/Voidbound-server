@@ -2,15 +2,17 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 
 // Allow requests from anywhere (CodeBeautify, your own domain, etc.).
-// This is a public leaderboard with no login, so an open policy is fine here.
+// This is a public leaderboard, so an open CORS policy is fine here.
 app.use(cors());
 app.use(express.json());
 
 const DATA_FILE = path.join(__dirname, 'scores.json');
+const USERS_FILE = path.join(__dirname, 'users.json');
 
 function loadScores() {
   try {
@@ -19,7 +21,6 @@ function loadScores() {
     return []; // file doesn't exist yet, or is corrupt/empty
   }
 }
-
 function saveScores(list) {
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify(list));
@@ -28,11 +29,83 @@ function saveScores(list) {
   }
 }
 
+function loadUsers() {
+  try {
+    return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+  } catch (err) {
+    return {}; // file doesn't exist yet, or is corrupt/empty
+  }
+}
+function saveUsers(users) {
+  try {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users));
+  } catch (err) {
+    console.error('Failed to persist users.json:', err.message);
+  }
+}
+
+// ---- Simple name/password claiming ----
+// Not a full account system: no email recovery, no rate limiting on
+// attempts, and the password is stored client-side in plain form for
+// convenience. It's enough to stop casual name-stealing between
+// players in a small friend group, not real account security.
+
+function hashPassword(password, salt) {
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+// Claims a name on first use, or verifies the password if the name is
+// already taken. Returns { ok: true } or { ok: false, error }.
+function authenticate(rawUser, rawPassword) {
+  const user = String(rawUser || '').trim();
+  const password = String(rawPassword || '');
+
+  if (!user) return { ok: false, error: 'Name is required.' };
+  if (user.length > 24) return { ok: false, error: 'Name is too long.' };
+  if (password.length < 4) return { ok: false, error: 'Password must be at least 4 characters.' };
+
+  const key = user.toLowerCase();
+  const users = loadUsers();
+  const record = users[key];
+
+  if (!record) {
+    // First time this name has been used - claim it with this password.
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = hashPassword(password, salt);
+    users[key] = { salt, hash, displayName: user };
+    saveUsers(users);
+    return { ok: true };
+  }
+
+  const candidateHash = hashPassword(password, record.salt);
+  const candidateBuf = Buffer.from(candidateHash, 'hex');
+  const storedBuf = Buffer.from(record.hash, 'hex');
+  const matches = candidateBuf.length === storedBuf.length
+    && crypto.timingSafeEqual(candidateBuf, storedBuf);
+
+  if (!matches) {
+    return { ok: false, error: 'That name is already taken by someone else (wrong password).' };
+  }
+  return { ok: true };
+}
+
+// Lets the game verify name+password up front (e.g. when the player types
+// them in), before a whole run is played, so mistakes surface early.
+app.post('/api/auth', (req, res) => {
+  const { user, password } = req.body || {};
+  const result = authenticate(user, password);
+  if (!result.ok) return res.status(401).json({ error: result.error });
+  res.json({ ok: true });
+});
+
 // Matches the payload built in recordRun() in the game file:
-// { time, mode, level, kills, won, user, adminMode }
+// { time, mode, level, kills, won, user, password, adminMode }
 app.post('/api/score', (req, res) => {
   const body = req.body || {};
-  const { time, mode, level, kills, won, user } = body;
+  const { time, mode, level, kills, won, user, password } = body;
+
+  const auth = authenticate(user, password);
+  if (!auth.ok) return res.status(401).json({ error: auth.error });
 
   if (typeof time !== 'number' || !Number.isFinite(time)) {
     return res.status(400).json({ error: 'Invalid or missing "time"' });
@@ -47,7 +120,7 @@ app.post('/api/score', (req, res) => {
     level: Number.isFinite(Number(level)) ? Number(level) : 1,
     kills: Number.isFinite(Number(kills)) ? Number(kills) : 0,
     won: !!won,
-    user: String(user || 'Guest').slice(0, 16),
+    user: String(user || 'Guest').trim().slice(0, 16),
     submittedAt: Date.now(),
   };
 
