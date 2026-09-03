@@ -44,7 +44,7 @@ function saveUsers(users) {
   }
 }
 
-// ---- Simple name/password claiming ----
+// ---- Account system: Sign Up / Log In ----
 // Not a full account system: no email recovery, no rate limiting on
 // attempts, and the password is stored client-side in plain form for
 // convenience. It's enough to stop casual name-stealing between
@@ -54,46 +54,70 @@ function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString('hex');
 }
 
-// Claims a name on first use, or verifies the password if the name is
-// already taken. Returns { ok: true } or { ok: false, error }.
-function authenticate(rawUser, rawPassword) {
+function passwordMatches(password, record) {
+  const candidateHash = hashPassword(password, record.salt);
+  const candidateBuf = Buffer.from(candidateHash, 'hex');
+  const storedBuf = Buffer.from(record.hash, 'hex');
+  return candidateBuf.length === storedBuf.length
+    && crypto.timingSafeEqual(candidateBuf, storedBuf);
+}
+
+function validateCredentials(rawUser, rawPassword) {
   const user = String(rawUser || '').trim();
   const password = String(rawPassword || '');
-
   if (!user) return { ok: false, error: 'Name is required.' };
   if (user.length > 24) return { ok: false, error: 'Name is too long.' };
   if (password.length < 4) return { ok: false, error: 'Password must be at least 4 characters.' };
+  return { ok: true, user, password };
+}
+
+// Creates a brand-new account. Fails if the name is already taken.
+function registerUser(rawUser, rawPassword) {
+  const check = validateCredentials(rawUser, rawPassword);
+  if (!check.ok) return check;
+  const { user, password } = check;
+
+  const key = user.toLowerCase();
+  const users = loadUsers();
+  if (users[key]) {
+    return { ok: false, error: 'That name is already taken.' };
+  }
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = hashPassword(password, salt);
+  users[key] = { salt, hash, displayName: user };
+  saveUsers(users);
+  return { ok: true };
+}
+
+// Verifies an existing account. Fails if the name doesn't exist, or the
+// password is wrong.
+function loginUser(rawUser, rawPassword) {
+  const check = validateCredentials(rawUser, rawPassword);
+  if (!check.ok) return check;
+  const { user, password } = check;
 
   const key = user.toLowerCase();
   const users = loadUsers();
   const record = users[key];
-
   if (!record) {
-    // First time this name has been used - claim it with this password.
-    const salt = crypto.randomBytes(16).toString('hex');
-    const hash = hashPassword(password, salt);
-    users[key] = { salt, hash, displayName: user };
-    saveUsers(users);
-    return { ok: true };
+    return { ok: false, error: 'No account found with that name.' };
   }
-
-  const candidateHash = hashPassword(password, record.salt);
-  const candidateBuf = Buffer.from(candidateHash, 'hex');
-  const storedBuf = Buffer.from(record.hash, 'hex');
-  const matches = candidateBuf.length === storedBuf.length
-    && crypto.timingSafeEqual(candidateBuf, storedBuf);
-
-  if (!matches) {
-    return { ok: false, error: 'That name is already taken by someone else (wrong password).' };
+  if (!passwordMatches(password, record)) {
+    return { ok: false, error: 'Incorrect password.' };
   }
   return { ok: true };
 }
 
-// Lets the game verify name+password up front (e.g. when the player types
-// them in), before a whole run is played, so mistakes surface early.
-app.post('/api/auth', (req, res) => {
+app.post('/api/register', (req, res) => {
   const { user, password } = req.body || {};
-  const result = authenticate(user, password);
+  const result = registerUser(user, password);
+  if (!result.ok) return res.status(409).json({ error: result.error });
+  res.json({ ok: true });
+});
+
+app.post('/api/login', (req, res) => {
+  const { user, password } = req.body || {};
+  const result = loginUser(user, password);
   if (!result.ok) return res.status(401).json({ error: result.error });
   res.json({ ok: true });
 });
@@ -134,7 +158,7 @@ app.post('/api/score', (req, res) => {
   const body = req.body || {};
   const { time, mode, level, kills, won, user, password } = body;
 
-  const auth = authenticate(user, password);
+  const auth = loginUser(user, password);
   if (!auth.ok) return res.status(401).json({ error: auth.error });
 
   if (typeof time !== 'number' || !Number.isFinite(time)) {
