@@ -105,21 +105,49 @@ function loginUser(rawUser, rawPassword) {
   if (!passwordMatches(password, record)) {
     return { ok: false, error: 'Incorrect password.' };
   }
-  return { ok: true };
+  return { ok: true, isAdmin: !!record.isAdmin };
 }
 
 app.post('/api/register', (req, res) => {
   const { user, password } = req.body || {};
   const result = registerUser(user, password);
   if (!result.ok) return res.status(409).json({ error: result.error });
-  res.json({ ok: true });
+  res.json({ ok: true, isAdmin: false }); // new accounts are never admin by default
 });
 
 app.post('/api/login', (req, res) => {
   const { user, password } = req.body || {};
   const result = loginUser(user, password);
   if (!result.ok) return res.status(401).json({ error: result.error });
-  res.json({ ok: true });
+  res.json({ ok: true, isAdmin: result.isAdmin });
+});
+
+// ---- Admin-only: grant or revoke admin status on an account ----
+// Protected by the same ADMIN_KEY as the reset-name endpoint. Call this
+// yourself (e.g. via curl) whenever you want to make an account an admin -
+// nobody else needs to know which usernames have this.
+app.post('/api/admin/set-admin', (req, res) => {
+  const { adminKey, user, isAdmin } = req.body || {};
+  const expectedKey = process.env.ADMIN_KEY;
+
+  if (!expectedKey) {
+    return res.status(500).json({ error: 'ADMIN_KEY is not configured on the server.' });
+  }
+  if (adminKey !== expectedKey) {
+    return res.status(401).json({ error: 'Invalid admin key.' });
+  }
+  if (!user || typeof user !== 'string') {
+    return res.status(400).json({ error: 'Missing "user".' });
+  }
+
+  const key = user.trim().toLowerCase();
+  const users = loadUsers();
+  if (!users[key]) {
+    return res.status(404).json({ error: `No account found matching "${user}". They need to sign up first.` });
+  }
+  users[key].isAdmin = !!isAdmin;
+  saveUsers(users);
+  res.json({ ok: true, user: users[key].displayName, isAdmin: users[key].isAdmin });
 });
 
 // ---- Admin-only: reset a name so it can be re-claimed with a new password ----
