@@ -234,4 +234,5 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Voidbound leaderboard server listening on port ${PORT}`);
+  console.log('ADMIN_KEY configured:', !!process.env.ADMIN_KEY);
 });
