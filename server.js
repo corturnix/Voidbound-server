@@ -55,7 +55,7 @@ async function initDb() {
 // access in-game (they still choose to turn it on/off themselves from the
 // Settings menu each session - this just decides who's allowed to).
 // Add or remove names here and redeploy to change who has access.
-const ADMIN_USERNAMES = new Set(['duckygod101', 'corturnix', 'ewerp']);
+const ADMIN_USERNAMES = new Set(['duckygod', 'corturnix', 'ewerp']);
 function isAdminUsername(key){ return ADMIN_USERNAMES.has(key); }
 
 function hashPassword(password, salt) {
@@ -232,9 +232,16 @@ app.post('/api/score', async (req, res) => {
 });
 
 // Matches fetchLeaderboard()'s expectation of { list: [...] }
+// Optional ?mode=classic|bossrush|hardmode query param filters to that
+// mode's scores only, so each game mode can have its own leaderboard.
+// Omitting it returns scores across all modes combined (kept for backward
+// compatibility with anything that doesn't pass a mode).
 app.get('/api/leaderboard', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM scores');
+    const { mode } = req.query || {};
+    const result = mode
+      ? await pool.query('SELECT * FROM scores WHERE mode = $1', [String(mode)])
+      : await pool.query('SELECT * FROM scores');
     const list = result.rows.map(r => ({
       time: r.run_time,
       mode: r.mode,
