@@ -55,7 +55,7 @@ async function initDb() {
 // access in-game (they still choose to turn it on/off themselves from the
 // Settings menu each session - this just decides who's allowed to).
 // Add or remove names here and redeploy to change who has access.
-const ADMIN_USERNAMES = new Set(['duckygod101', 'corturnix', 'ewerp']);
+const ADMIN_USERNAMES = new Set(['Duckygod101', 'corturnix', 'ewerp']);
 function isAdminUsername(key){ return ADMIN_USERNAMES.has(key); }
 
 function hashPassword(password, salt) {
