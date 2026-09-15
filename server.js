@@ -193,6 +193,59 @@ app.post('/api/admin/reset-name', async (req, res) => {
   }
 });
 
+// ---- Admin-only: list every submitted score (not just the top 10 shown
+// in-game), optionally filtered by mode, so individual entries can be
+// reviewed and removed - e.g. runs that slipped onto the board despite
+// having used admin tools.
+app.post('/api/admin/scores', async (req, res) => {
+  try {
+    const { user, password, mode } = req.body || {};
+    const check = await requireAdmin(user, password);
+    if(!check.ok) return res.status(403).json({ error: check.error });
+
+    const result = mode
+      ? await pool.query('SELECT * FROM scores WHERE mode = $1 ORDER BY submitted_at DESC', [String(mode)])
+      : await pool.query('SELECT * FROM scores ORDER BY submitted_at DESC');
+
+    const scores = result.rows.map(r => ({
+      id: r.id,
+      time: r.run_time,
+      mode: r.mode,
+      level: r.level,
+      kills: r.kills,
+      won: r.won,
+      user: r.player_name,
+      submittedAt: Number(r.submitted_at),
+    }));
+    res.json({ scores });
+  } catch (err) {
+    console.error('admin scores list error:', err.message);
+    res.status(500).json({ error: 'Server error - please try again.' });
+  }
+});
+
+// ---- Admin-only: delete a single score entry by its id ----
+app.post('/api/admin/delete-score', async (req, res) => {
+  try {
+    const { user, password, scoreId } = req.body || {};
+    const check = await requireAdmin(user, password);
+    if(!check.ok) return res.status(403).json({ error: check.error });
+
+    const id = Number(scoreId);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Missing or invalid "scoreId".' });
+    }
+    const result = await pool.query('DELETE FROM scores WHERE id = $1', [id]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Score not found (it may already be deleted).' });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('delete-score error:', err.message);
+    res.status(500).json({ error: 'Server error - please try again.' });
+  }
+});
+
 // Matches the payload built in recordRun() in the game file:
 // { time, mode, level, kills, won, user, password, adminMode }
 app.post('/api/score', async (req, res) => {
