@@ -41,7 +41,32 @@ async function initDb() {
       submitted_at BIGINT NOT NULL
     );
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS admin_logs (
+      id SERIAL PRIMARY KEY,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target TEXT,
+      details TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
   console.log('Database tables ready.');
+}
+
+// Records a destructive admin action (account resets, score deletions) for
+// later review. Deliberately NOT used for the in-game admin tools like
+// setting weapon level or player stats - those only affect a single-player
+// run, not other people's data, so they don't need an audit trail.
+async function logAdminAction(actor, action, target, details){
+  try{
+    await pool.query(
+      'INSERT INTO admin_logs (actor, action, target, details) VALUES ($1, $2, $3, $4)',
+      [actor, action, target || null, details || null]
+    );
+  }catch(err){
+    console.error('Failed to write admin log entry:', err.message);
+  }
 }
 
 // ---- Account system: Sign Up / Log In ----
@@ -186,6 +211,7 @@ app.post('/api/admin/reset-name', async (req, res) => {
     if (result.rowCount === 0) {
       return res.status(404).json({ error: `No account found matching "${targetUser}".` });
     }
+    await logAdminAction(user, 'reset_account', targetUser);
     res.json({ ok: true, message: `"${targetUser}" has been reset and can be re-claimed with a new password.` });
   } catch (err) {
     console.error('reset-name error:', err.message);
@@ -235,13 +261,45 @@ app.post('/api/admin/delete-score', async (req, res) => {
     if (!Number.isFinite(id)) {
       return res.status(400).json({ error: 'Missing or invalid "scoreId".' });
     }
+    // Fetch it first so the log entry can say what was actually deleted,
+    // not just its id.
+    const existing = await pool.query('SELECT * FROM scores WHERE id = $1', [id]);
+    const row = existing.rows[0];
     const result = await pool.query('DELETE FROM scores WHERE id = $1', [id]);
     if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Score not found (it may already be deleted).' });
     }
+    const details = row
+      ? `${row.player_name} - ${row.mode} - ${row.run_time}s - Lv${row.level} - ${row.kills} kills${row.won ? ' (won)' : ''}`
+      : null;
+    await logAdminAction(user, 'delete_score', `score #${id}`, details);
     res.json({ ok: true });
   } catch (err) {
     console.error('delete-score error:', err.message);
+    res.status(500).json({ error: 'Server error - please try again.' });
+  }
+});
+
+// ---- Admin-only: view the audit log of destructive admin actions ----
+app.post('/api/admin/logs', async (req, res) => {
+  try {
+    const { user, password } = req.body || {};
+    const check = await requireAdmin(user, password);
+    if(!check.ok) return res.status(403).json({ error: check.error });
+
+    const result = await pool.query(
+      'SELECT actor, action, target, details, created_at FROM admin_logs ORDER BY created_at DESC LIMIT 200'
+    );
+    const logs = result.rows.map(r => ({
+      actor: r.actor,
+      action: r.action,
+      target: r.target,
+      details: r.details,
+      createdAt: r.created_at,
+    }));
+    res.json({ logs });
+  } catch (err) {
+    console.error('admin logs fetch error:', err.message);
     res.status(500).json({ error: 'Server error - please try again.' });
   }
 });
