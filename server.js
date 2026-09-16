@@ -41,6 +41,10 @@ async function initDb() {
       submitted_at BIGINT NOT NULL
     );
   `);
+  // Added after the table already existed on deployed databases, so this
+  // uses ALTER ... ADD COLUMN IF NOT EXISTS rather than being part of the
+  // CREATE TABLE above (which only runs for brand-new tables).
+  await pool.query(`ALTER TABLE scores ADD COLUMN IF NOT EXISTS boss_reached INTEGER NOT NULL DEFAULT 0;`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS admin_logs (
       id SERIAL PRIMARY KEY,
@@ -242,6 +246,7 @@ app.post('/api/admin/scores', async (req, res) => {
       won: r.won,
       user: r.player_name,
       submittedAt: Number(r.submitted_at),
+      bossReached: r.boss_reached,
     }));
     res.json({ scores });
   } catch (err) {
@@ -305,11 +310,11 @@ app.post('/api/admin/logs', async (req, res) => {
 });
 
 // Matches the payload built in recordRun() in the game file:
-// { time, mode, level, kills, won, user, password, adminMode }
+// { time, mode, level, kills, won, user, password, adminMode, bossReached }
 app.post('/api/score', async (req, res) => {
   try {
     const body = req.body || {};
-    const { time, mode, level, kills, won, user, password } = body;
+    const { time, mode, level, kills, won, user, password, bossReached } = body;
 
     const auth = await loginUser(user, password);
     if (!auth.ok) return res.status(401).json({ error: auth.error });
@@ -322,8 +327,8 @@ app.post('/api/score', async (req, res) => {
     }
 
     await pool.query(
-      `INSERT INTO scores (run_time, mode, level, kills, won, player_name, submitted_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      `INSERT INTO scores (run_time, mode, level, kills, won, player_name, submitted_at, boss_reached)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         time,
         mode,
@@ -332,6 +337,7 @@ app.post('/api/score', async (req, res) => {
         !!won,
         String(user || 'Guest').trim().slice(0, 16),
         Date.now(),
+        Number.isFinite(Number(bossReached)) ? Number(bossReached) : 0,
       ]
     );
 
@@ -361,10 +367,26 @@ app.get('/api/leaderboard', async (req, res) => {
       won: r.won,
       user: r.player_name,
       submittedAt: Number(r.submitted_at),
+      bossReached: r.boss_reached,
     }));
 
-    // Wins sort first (fastest win on top); losses sort below (longest survival on top)
+    // Ranking rule depends on the mode:
+    //  - Boss Rush: furthest boss reached wins; ties broken by faster time
+    //    (a full clear naturally sorts first since it has the max boss count)
+    //  - Classic: most kills wins; ties broken by longer survival time
+    //  - Everything else (Hard Mode, or no mode filter): original
+    //    win-first-then-time rule
     list.sort((a, b) => {
+      if(mode === 'bossrush'){
+        const aBoss = a.bossReached || 0, bBoss = b.bossReached || 0;
+        if(aBoss !== bBoss) return bBoss - aBoss;
+        return a.time - b.time;
+      }
+      if(mode === 'classic'){
+        const aKills = a.kills || 0, bKills = b.kills || 0;
+        if(aKills !== bKills) return bKills - aKills;
+        return b.time - a.time;
+      }
       if (a.won !== b.won) return a.won ? -1 : 1;
       return a.won ? (a.time - b.time) : (b.time - a.time);
     });
